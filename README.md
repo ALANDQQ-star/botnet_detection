@@ -4,34 +4,34 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28%2B-FF4B4B)](https://streamlit.io/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-## 📖 项目简介
+## 项目简介
 
 BOTNET HUNTER 是一个基于图神经网络（GNN）的僵尸网络威胁分析平台，专为学术实验环境设计。该平台集成了多种机器学习方法，能够实时检测、分析和推演僵尸网络威胁。
 
 ### 核心功能
 
-- **🧠 双模式检测方法**
+- **双模式检测方法**
   - **现有方法 (GAT+GCN)**: 基于图注意力网络和图卷积网络的混合架构
   - **基线方法 (Bot-AHGCN)**: 基于异构信息网络的僵尸网络检测方法
 
-- **📊 实时可视化**
+- **实时可视化**
   - 全球僵尸网络态势地图
   - 中国区域威胁热力图
   - 网络拓扑结构可视化
   - 图神经网络推理过程动态展示
 
-- **🔍 威胁分析**
+- **威胁分析**
   - C2 服务器识别与定位
   - 攻击链建模（HMM）
   - 时空关联分析
   - 15 步动态推演
 
-- **📈 评估指标**
+- **评估指标**
   - AUC、F1、精确率、召回率实时统计
   - 阈值自动优化
   - 运行历史对比
 
-## 🚀 快速部署
+## 快速部署
 
 ### 环境要求
 
@@ -80,7 +80,7 @@ streamlit run app.py
 
 应用将在 `http://localhost:8501` 启动。
 
-## 📁 项目结构
+## 项目结构
 
 ```
 BOT/
@@ -109,7 +109,7 @@ BOT/
 └── README.md                   # 项目说明
 ```
 
-## 🎮 使用指南
+## 使用指南
 
 ### 1. 配置参数
 
@@ -166,16 +166,9 @@ AHIN 构建 → 元路径相似性 → 注意力聚合 → 分类
 - Bot 比例 (Bot Ratio)
 - 通信间隔统计 (IAT)
 
-## 📊 性能指标
 
-| 方法 | AUC | F1 | 精确率 | 召回率 |
-|------|-----|-----|--------|--------|
-| GAT+GCN | ~0.95 | ~0.80 | ~0.85 | ~0.75 |
-| Bot-AHGCN | ~0.92 | ~0.75 | ~0.80 | ~0.70 |
 
-*注：实际性能取决于数据集和参数配置*
-
-## 🤝 贡献指南
+## 贡献指南
 
 欢迎提交 Issue 和 Pull Request！
 
@@ -185,20 +178,20 @@ AHIN 构建 → 元路径相似性 → 注意力聚合 → 分类
 4. 推送到分支 (`git push origin feature/AmazingFeature`)
 5. 开启 Pull Request
 
-## 📄 许可证
+## 许可证
 
 本项目仅供学术研究使用。请参考 LICENSE 文件了解详情。
 
-## 🙏 致谢
+## 致谢
 
 - [CTU-13 Dataset](https://mcfp.felk.cvut.cz/publicDatasets/CTU-Malware-Capture-Botnet-42/)
 - [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/)
 - [Streamlit](https://streamlit.io/)
 
-## 📧 联系方式
+## 联系方式
 
 如有问题或建议，请通过 Issue 联系。
 
 ---
 
-**⚠️ 免责声明**: 本工具仅用于学术研究和安全分析目的。使用者需遵守相关法律法规，不得用于非法活动。
+**免责声明**: 本工具仅用于学术研究和安全分析目的。使用者需遵守相关法律法规，不得用于非法活动。
