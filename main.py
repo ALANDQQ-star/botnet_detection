@@ -14,8 +14,102 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 warnings.filterwarnings("ignore")
 
 # --- UI通信辅助函数 ---
+import threading
+
+# UI 状态文件路径
+UI_STATE_FILE = "ui_state.json"
+_ui_state_lock = threading.Lock()
+
 def send_ui(type, msg):
-    print(f"@@UI_SIGNAL@@|{type}|{msg}", flush=True)
+    """发送 UI 信号，同时写入文件和 stdout"""
+    signal = f"@@UI_SIGNAL@@|{type}|{msg}"
+    print(signal, flush=True)
+    # 写入状态文件
+    update_ui_state_file(type, msg)
+
+def update_ui_state_file(signal_type, content):
+    """更新 UI 状态文件"""
+    global _ui_state_lock
+    with _ui_state_lock:
+        try:
+            # 读取现有状态
+            state = {}
+            if os.path.exists(UI_STATE_FILE):
+                try:
+                    with open(UI_STATE_FILE, "r") as f:
+                        state = json.load(f)
+                except:
+                    pass
+            
+            # 更新状态
+            state["last_update"] = time.time()
+            state["signal_type"] = signal_type
+            state["content"] = content
+            
+            # 根据信号类型更新特定字段
+            if signal_type == "BATCH_UPDATE":
+                # 读取 batch 数据文件
+                if os.path.exists(content):
+                    with open(content, "r") as f:
+                        batch_data = json.load(f)
+                    state["batch_data"] = batch_data
+                    # 更新可视化状态
+                    state["red_nodes"] = state.get("red_nodes", []) + batch_data.get("new_red_nodes", [])
+                    state["yellow_nodes"] = batch_data.get("yellow_nodes", [])
+                    state["country_stats"] = batch_data.get("country_stats", {})
+                    state["province_stats"] = batch_data.get("province_stats", {})
+                    state["sim_time"] = batch_data.get("sim_time")
+                    step = batch_data.get("step", 0)
+                    total_steps = batch_data.get("total_steps", 1)
+                    if total_steps > 0:
+                        state["progress"] = min(1.0, 0.5 + (step / total_steps) * 0.5)
+                    state["step_info"] = f"推演中: 步骤 {step}/{total_steps}"
+            elif signal_type == "PHASE_START":
+                state["step_info"] = content
+                if content.strip() == "运行完毕":
+                    state["progress"] = 1.0
+                elif "HMM" in content or "攻击链" in content:
+                    state["progress"] = max(state.get("progress", 0), 0.05)
+                elif "GNN" in content or "训练" in content:
+                    state["progress"] = max(state.get("progress", 0), 0.15)
+                elif "推演" in content or "感染" in content:
+                    state["progress"] = max(state.get("progress", 0), 0.5)
+                elif "报告" in content or "生成" in content:
+                    state["progress"] = max(state.get("progress", 0), 0.9)
+                elif "评估" in content or "威胁" in content:
+                    state["progress"] = max(state.get("progress", 0), 0.35)
+            elif signal_type == "EPOCH_UPDATE":
+                parts = content.split("|")
+                if len(parts) == 3:
+                    ep, tot, loss = parts
+                    state["step_info"] = f"训练轮次 {ep}/{tot}（损失: {loss}）"
+                    ep_val = int(ep)
+                    tot_val = int(tot)
+                    if tot_val > 0:
+                        state["progress"] = max(state.get("progress", 0), 0.15 + (ep_val / tot_val) * 0.2)
+            elif signal_type == "PROGRESS_INFERENCE":
+                parts = content.split("|")
+                if len(parts) == 2:
+                    cur, tot = int(parts[0]), int(parts[1])
+                    state["step_info"] = f"推理进度 {cur}/{tot}"
+                    if tot > 0:
+                        state["progress"] = max(state.get("progress", 0), 0.35 + (cur / tot) * 0.15)
+            elif signal_type == "METRICS":
+                parts = content.split("|")
+                if len(parts) == 5:
+                    auc, f1, prec, rec, th = parts
+                    state["metrics"] = {"auc": auc, "f1": f1, "prec": prec, "rec": rec, "thresh": th}
+            elif signal_type == "GNN_VIS":
+                try:
+                    state["gnn_viz_data"] = json.loads(content)
+                except:
+                    pass
+            
+            # 写入文件
+            with open(UI_STATE_FILE, "w") as f:
+                json.dump(state, f)
+        except Exception as e:
+            print(f"Error updating UI state file: {e}")
 
 def log_ui(msg):
     send_ui("LOG", msg)

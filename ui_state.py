@@ -1,10 +1,46 @@
 import streamlit as st
 from collections import deque
 from datetime import datetime
+import os
+import json
+
+PROCESS_STATE_FILE = "process_state.json"
+
+def is_process_alive(pid):
+    """检查进程是否存活"""
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+def get_process_state():
+    """获取进程状态"""
+    if os.path.exists(PROCESS_STATE_FILE):
+        try:
+            with open(PROCESS_STATE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return None
 
 def init_state():
+    # 首先检查是否有正在运行的进程
+    process_state = get_process_state()
+    running_process = False
+    if process_state and process_state.get("status") == "running":
+        pid = process_state.get("pid")
+        if pid and is_process_alive(pid):
+            running_process = True
+    
     if "is_running" not in st.session_state:
-        st.session_state.is_running = False
+        # 如果有正在运行的进程，恢复运行状态
+        st.session_state.is_running = running_process
+    elif running_process:
+        # 确保状态同步
+        st.session_state.is_running = True
     if "activity_stream" not in st.session_state:
         st.session_state.activity_stream = deque(maxlen=200)
     if "viz_state" not in st.session_state:
