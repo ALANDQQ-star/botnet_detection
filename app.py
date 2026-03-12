@@ -183,7 +183,7 @@ def render_maps(map_view, container):
     for node_type, color in [("red_nodes", [255, 50, 50, 200]), ("yellow_nodes", [255, 215, 0, 255])]:
         data = st.session_state.viz_state.get(node_type)
         if data:
-            scatter_layers.append(pdk.Layer("ScatterplotLayer", data=pd.DataFrame(data), get_position=["lon", "lat"], get_color=color, get_radius=50000 if node_type=="yellow_nodes" else 30000, radius_min_pixels=6, radius_max_pixels=30, pickable=True))
+            scatter_layers.append(pdk.Layer("ScatterplotLayer", data=pd.DataFrame(data), get_position=["lon", "lat"], get_color=color, get_radius=30000, radius_min_pixels=6, radius_max_pixels=30, pickable=True))
     with container:
         if map_view == "全球":
             world_layers = []
