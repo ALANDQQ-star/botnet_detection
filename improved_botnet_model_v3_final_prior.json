@@ -1,0 +1,9 @@
+{
+  "threshold": 0.00010864921932807192,
+  "threshold_percentile": 2.0264722056906956,
+  "bot_score_median": 0.0001502723607700318,
+  "bot_score_mean": 0.020542416721582413,
+  "normal_score_median": 0.0001503490493632853,
+  "normal_score_mean": 0.024067005142569542,
+  "bot_ratio": 0.023643432185053825
+}

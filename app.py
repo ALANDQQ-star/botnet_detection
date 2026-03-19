@@ -180,10 +180,28 @@ def render_maps(map_view, container):
             return [255, 0, 0, intensity] if count >= 100 else [255, 69, 0, 200] if count >= 50 else [255, 140, 0, 180] if count >= 20 else [255, 215, 0, 160] if count >= 5 else [0, 200, 0, 140]
         return [20, 20, 20, 100]
     scatter_layers = []
-    for node_type, color in [("red_nodes", [255, 50, 50, 200]), ("yellow_nodes", [255, 215, 0, 255])]:
-        data = st.session_state.viz_state.get(node_type)
-        if data:
-            scatter_layers.append(pdk.Layer("ScatterplotLayer", data=pd.DataFrame(data), get_position=["lon", "lat"], get_color=color, get_radius=30000, radius_min_pixels=6, radius_max_pixels=30, pickable=True))
+    # 红点 - 已确认威胁节点
+    red_data = st.session_state.viz_state.get("red_nodes")
+    if red_data:
+        scatter_layers.append(pdk.Layer("ScatterplotLayer", 
+            data=pd.DataFrame(red_data), 
+            get_position=["lon", "lat"], 
+            get_color=[255, 50, 50, 200], 
+            get_radius=30000, 
+            radius_min_pixels=8, 
+            radius_max_pixels=30, 
+            pickable=True))
+    # 黄点 - 疑似风险节点 (大小与红点一致)
+    yellow_data = st.session_state.viz_state.get("yellow_nodes")
+    if yellow_data:
+        scatter_layers.append(pdk.Layer("ScatterplotLayer", 
+            data=pd.DataFrame(yellow_data), 
+            get_position=["lon", "lat"], 
+            get_color=[255, 215, 0, 255], 
+            get_radius=30000, 
+            radius_min_pixels=8, 
+            radius_max_pixels=30, 
+            pickable=True))
     with container:
         if map_view == "全球":
             world_layers = []
@@ -295,13 +313,14 @@ with col_main_left:
     # 方法选择
     method_label = {
         "existing": "现有方法 (GAT+GCN)",
-        "baseline": "基线方法 (Bot-AHGCN)"
+        "baseline": "基线方法 (Bot-AHGCN)",
+        "v3_final": "V3 Final (三模态异构图)"
     }
     selected_method = st.selectbox(
         "检测方法",
-        ["existing", "baseline"],
+        ["existing", "baseline", "v3_final"],
         format_func=lambda x: method_label.get(x, x),
-        index=0 if st.session_state.config.get("method", "existing") == "existing" else 1,
+        index=["existing", "baseline", "v3_final"].index(st.session_state.config.get("method", "existing")) if st.session_state.config.get("method", "existing") in ["existing", "baseline", "v3_final"] else 0,
         key="method_selector"
     )
     st.session_state.config["method"] = selected_method

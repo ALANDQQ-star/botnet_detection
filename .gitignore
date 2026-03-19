@@ -39,7 +39,7 @@ env/
 .ipynb_checkpoints
 
 # Model files (too large for GitHub)
-*.pth
+# *.pth  — allowed: all model files are < 1MB
 *.pt
 *.pkl
 *.pickle
@@ -51,22 +51,25 @@ env/
 
 # Data files
 *.csv
+# Allow essential JSON files
 *.json
 !package.json
+!hmm_model.json
+!improved_botnet_model_v3_final_prior.json
 *.parquet
 *.h5
 *.hdf5
 
-# Generated reports and data
-attack_chain_report.json
-c2_candidates.json
-network_topology.json
-topology_eval_report.json
-viz_data.json
-viz_state_persist.json
-batch_data.json
-run_history.json
-hmm_model.json
+# Generated reports and data (covered by *.json above)
+# attack_chain_report.json
+# c2_candidates.json
+# network_topology.json
+# topology_eval_report.json
+# viz_data.json
+# viz_state_persist.json
+# batch_data.json
+# run_history.json
+# hmm_model.json  — now allowed via !hmm_model.json
 
 # Logs
 *.log

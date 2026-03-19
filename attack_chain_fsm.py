@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+from datetime import datetime
 from enum import Enum
 from collections import defaultdict, Counter
 from sklearn.metrics import accuracy_score
@@ -196,18 +197,28 @@ class HMMModel:
     def predict_context_aware(self, curr_state, prev_state=None):
         """
         [改进] 二阶上下文预测
-        策略：优先查表 Context[Prev][Curr]，如果为空则查 Global[Curr]
+        策略：
+        1. 优先查表 Context[Prev][Curr]
+        2. 回退到 Global[Curr]
+        3. 最终回退到转移矩阵 A[Curr]
+        返回: (next_state, probability_distribution)
         """
-        if not self.is_trained: return curr_state
-        
+        if not self.is_trained: return curr_state, np.zeros(self.N)
+
         # 1. 尝试上下文匹配
         if prev_state is not None:
-            # 检查是否有有效概率分布 (sum > 0)
-            if np.sum(self.context_horizon_probs[prev_state, curr_state]) > 0.01:
-                return np.argmax(self.context_horizon_probs[prev_state, curr_state])
-        
+            ctx_probs = self.context_horizon_probs[prev_state, curr_state]
+            if np.sum(ctx_probs) > 0.01:
+                return np.argmax(ctx_probs), ctx_probs.copy()
+
         # 2. 回退到全局分布
-        return np.argmax(self.global_horizon_probs[curr_state])
+        g_probs = self.global_horizon_probs[curr_state]
+        if np.sum(g_probs) > 0.01:
+            return np.argmax(g_probs), g_probs.copy()
+
+        # 3. 回退到转移矩阵
+        a_probs = self.A[curr_state]
+        return np.argmax(a_probs), a_probs.copy()
 
     def save(self, path='hmm_model.json'):
         data = {
@@ -430,14 +441,207 @@ class AttackChainInference:
                 chain_log = []
                 sample_step = max(1, len(hidden_path) // 30)
                 for i in range(0, len(hidden_path), sample_step):
-                    chain_log.append({'ts': str(times[i]), 'state': path_names[i], 'obs': obs_names[i]})
-                chain_log.append({'ts': str(times[-1]), 'state': path_names[-1], 'obs': obs_names[-1]})
+                    # 将 Unix 时间戳转换为年月日时分秒格式
+                    try:
+                        ts_str = datetime.fromtimestamp(times[i]).strftime('%Y-%m-%d %H:%M:%S')
+                    except:
+                        ts_str = str(times[i])
+                    chain_log.append({'ts': ts_str, 'state': path_names[i], 'obs': obs_names[i]})
+                # 最后一条记录
+                try:
+                    ts_str = datetime.fromtimestamp(times[-1]).strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    ts_str = str(times[-1])
+                chain_log.append({'ts': ts_str, 'state': path_names[-1], 'obs': obs_names[-1]})
 
                 report[ip] = {
                     'final_state': path_names[-1],
                     'chain_len': len(hidden_path),
-                    'recent_logs': chain_log[-10:]
+                    'recent_logs': chain_log[-10:],
                 }
+
+                # 预测下一步状态
+                curr_s = hidden_path[-1]
+                prev_s = hidden_path[-2] if len(hidden_path) > 1 else None
+                next_state, next_probs = self.model.predict_context_aware(curr_s, prev_s)
+                next_state_name = BotState(next_state).name
+
+                # 构建概率分布（top-3）
+                top_indices = np.argsort(next_probs)[::-1][:3]
+                next_dist = []
+                for idx in top_indices:
+                    if next_probs[idx] > 0.01:
+                        next_dist.append({
+                            'state': BotState(idx).name,
+                            'prob': round(float(next_probs[idx]), 4)
+                        })
+
+                report[ip]['predicted_next_state'] = next_state_name
+                report[ip]['next_state_distribution'] = next_dist
         
         print(f"[HMM] 完成。生成了 {len(report)} 个 Bot 的攻击链报告。")
         return report
+
+    def identify_c2_nodes(self, df):
+        """
+        基于攻击链状态识别 C2 服务器节点。
+        C2 特征：
+        1. 作为 dst_ip 被多个 bot 连接（高入度）
+        2. 关联流量以 C2_SETUP / C2_MAINTAIN 状态为主
+        3. 长连接、低包速率、固定端口模式
+        返回: list of dict，每个包含 ip, score, evidence
+        """
+        if not self.bot_ips or df.empty:
+            return []
+
+        # 筛选 bot 发出的流量
+        bot_traffic = df[df['src_ip'].isin(self.bot_ips)].copy()
+        if bot_traffic.empty:
+            return []
+
+        # 统计每个 dst_ip 被多少个不同 bot 连接
+        dst_bot_counts = bot_traffic.groupby('dst_ip')['src_ip'].nunique()
+        # 排除 bot 自身作为 dst
+        dst_bot_counts = dst_bot_counts[~dst_bot_counts.index.isin(self.bot_ips)]
+
+        if dst_bot_counts.empty:
+            return []
+
+        # 对每个候选 dst_ip 分析流量特征
+        c2_candidates = []
+        for dst_ip, n_bots in dst_bot_counts.items():
+            dst_flows = bot_traffic[bot_traffic['dst_ip'] == dst_ip]
+            n_flows = len(dst_flows)
+            if n_flows < 3:
+                continue
+
+            # 量化观测
+            c2_obs_count = 0
+            for _, row in dst_flows.iterrows():
+                obs = ObservationQuantizer.quantize(row.to_dict())
+                if obs in (TrafficObs.TCP_SYN_LOW, TrafficObs.LONG_CONN):
+                    c2_obs_count += 1
+
+            c2_ratio = c2_obs_count / (n_flows + 1e-10)
+
+            # 端口集中度
+            if 'dst_port' in dst_flows.columns:
+                port_counts = dst_flows['dst_port'].value_counts()
+                port_concentration = port_counts.iloc[0] / n_flows if len(port_counts) > 0 else 0
+            else:
+                port_concentration = 0
+
+            # 综合评分
+            score = (
+                0.35 * min(1.0, n_bots / 3) +        # 被多个 bot 连接
+                0.30 * c2_ratio +                      # C2 相关流量占比
+                0.20 * port_concentration +             # 端口集中度
+                0.15 * min(1.0, n_flows / 20)          # 流量量
+            )
+
+            if score > 0.25:
+                c2_candidates.append({
+                    'ip': dst_ip,
+                    'score': round(float(score), 4),
+                    'n_bots_connected': int(n_bots),
+                    'n_flows': int(n_flows),
+                    'c2_traffic_ratio': round(float(c2_ratio), 4),
+                    'port_concentration': round(float(port_concentration), 4),
+                    'evidence': f"被{n_bots}个bot连接, C2流量占比{c2_ratio:.1%}, 端口集中度{port_concentration:.1%}"
+                })
+
+        c2_candidates.sort(key=lambda x: x['score'], reverse=True)
+        print(f"[C2] 识别到 {len(c2_candidates)} 个 C2 候选节点")
+        return c2_candidates
+
+    def evaluate_state_prediction(self, df):
+        """
+        评估状态预测准确率。
+        方法：对每个 bot 的流量序列，先用 Viterbi 解码得到隐状态路径，
+        然后用前 t 步预测第 t+1 步状态，与 Viterbi 路径对比。
+        同时计算 top-1 和 top-3 准确率。
+        返回: dict 包含各项准确率指标
+        """
+        if not self.model.is_trained or df.empty:
+            return {'top1_accuracy': 0, 'top3_accuracy': 0, 'total': 0}
+
+        if 'ts' not in df.columns and 'start_time' in df.columns:
+            df = df.copy()
+            df['start_time'] = pd.to_datetime(df['start_time'], errors='coerce')
+            df['ts'] = df['start_time'].astype(np.int64) // 10**9
+
+        relevant_df = df[df['src_ip'].isin(self.bot_ips)].sort_values('ts') if self.bot_ips else df.sort_values('ts')
+        if relevant_df.empty:
+            return {'top1_accuracy': 0, 'top3_accuracy': 0, 'total': 0}
+
+        top1_correct = 0
+        top3_correct = 0
+        total = 0
+        state_correct = defaultdict(int)
+        state_total = defaultdict(int)
+
+        grouped = relevant_df.groupby('src_ip')
+        for ip, group in grouped:
+            if len(group) < 5:
+                continue
+
+            # 提取观测序列
+            obs_seq = []
+            for _, row in group.iterrows():
+                obs = ObservationQuantizer.quantize(row.to_dict())
+                obs_seq.append(obs.value)
+
+            # Viterbi 解码得到隐状态路径
+            hidden_path = self.model.viterbi(obs_seq)
+            if len(hidden_path) < 3:
+                continue
+
+            # 逐步预测
+            for t in range(1, len(hidden_path) - 1):
+                prev_s = hidden_path[t - 1]
+                curr_s = hidden_path[t]
+                actual_next = hidden_path[t + 1]
+
+                predicted_next, probs = self.model.predict_context_aware(curr_s, prev_s)
+
+                state_name = BotState(curr_s).name
+                state_total[state_name] += 1
+                total += 1
+
+                # Top-1 准确率
+                if predicted_next == actual_next:
+                    top1_correct += 1
+                    state_correct[state_name] += 1
+
+                # Top-3 准确率
+                top3_indices = np.argsort(probs)[::-1][:3]
+                if actual_next in top3_indices:
+                    top3_correct += 1
+
+        top1_acc = top1_correct / total if total > 0 else 0
+        top3_acc = top3_correct / total if total > 0 else 0
+
+        # 每个状态的预测准确率
+        per_state_acc = {}
+        for state_name in state_total:
+            per_state_acc[state_name] = {
+                'accuracy': round(state_correct[state_name] / state_total[state_name], 4) if state_total[state_name] > 0 else 0,
+                'total': state_total[state_name],
+                'correct': state_correct[state_name]
+            }
+
+        result = {
+            'top1_accuracy': round(top1_acc, 4),
+            'top3_accuracy': round(top3_acc, 4),
+            'total_predictions': total,
+            'top1_correct': top1_correct,
+            'top3_correct': top3_correct,
+            'per_state_accuracy': per_state_acc
+        }
+
+        print(f"[HMM评估] 状态预测 Top-1 准确率: {top1_acc:.4f} ({top1_correct}/{total})")
+        print(f"[HMM评估] 状态预测 Top-3 准确率: {top3_acc:.4f} ({top3_correct}/{total})")
+        for s, info in sorted(per_state_acc.items(), key=lambda x: x[1]['total'], reverse=True):
+            print(f"  {s:15s}: {info['accuracy']:.4f} ({info['correct']}/{info['total']})")
+
+        return result

@@ -134,9 +134,14 @@ from attack_chain_fsm import AttackChainInference
 from spatiotemporal_analysis import SpatioTemporalAnalyzer
 from viz_utils import get_ip_info
 from bot_ahgcn_baseline import (
-    BotAHGCNGraphBuilder, MetaPathSimilarity, 
+    BotAHGCNGraphBuilder, MetaPathSimilarity,
     BotAHGCNModel, BotAHGCNTrainer, prepare_ahgcn_data
 )
+
+# V3 Final 模块
+from improved_heterogeneous_graph import ImprovedHeterogeneousGraphBuilder
+from improved_model_v3_final import ImprovedBotnetDetectorV3Final, ImprovedTrainerV3Final
+from smart_threshold_optimizer import SmartThresholdOptimizer
 
 log_ui("环境就绪，解析参数…")
 
@@ -155,7 +160,7 @@ def parse_args():
     parser.add_argument('--threshold', type=float, default=0.01)
     parser.add_argument('--force_retrain', action='store_true')
     parser.add_argument('--force_hmm', action='store_true')
-    parser.add_argument('--method', type=str, default='existing', choices=['existing', 'baseline'], help='Detection method: existing (GAT+GCN) or baseline (Bot-AHGCN)')
+    parser.add_argument('--method', type=str, default='existing', choices=['existing', 'baseline', 'v3_final'], help='Detection method: existing (GAT+GCN), baseline (Bot-AHGCN), or v3_final (Tri-Modal V3 Final)')
     return parser.parse_args()
 
 # --- 辅助函数 ---
@@ -380,8 +385,10 @@ def run_hmm_training(args):
 # --- 模块2: GNN 训练 (现有方法) ---
 def run_gnn_training(args, device):
     if args.method == 'baseline':
-        # 调用基线方法训练
         run_baseline_training(args, device)
+        return
+    if args.method == 'v3_final':
+        run_v3final_training(args, device)
         return
         
     if os.path.exists(args.model_path) and not args.force_retrain:
@@ -498,13 +505,165 @@ def run_baseline_training(args, device):
     torch.cuda.empty_cache(); gc.collect()
     log_ui("Bot-AHGCN 训练结束。")
 
+# --- 模块2c: V3 Final 三模态异构图训练 ---
+def run_v3final_training(args, device):
+    v3_model_path = "improved_botnet_model_v3_final.pth"
+    v3_prior_path = v3_model_path.replace('.pth', '_prior.json')
+    if os.path.exists(v3_model_path) and not args.force_retrain:
+        log_ui("已存在 V3 Final 模型，跳过训练。")
+        args.model_path = v3_model_path
+        return
+
+    send_ui("PHASE_START", "V3 Final 三模态模型训练")
+    loader = CTU13Loader(args.data_dir)
+    log_ui("加载训练数据…")
+    train_scens = [int(s) for s in args.train_scenarios.split(',')]
+    df = loader.load_data(train_scens)
+    if df.empty: return
+
+    log_ui("构建三模态异构图…")
+    builder = ImprovedHeterogeneousGraphBuilder()
+    data, ip_map = builder.build(df)
+    labels, _ = get_labels(df, ip_map)
+
+    from sklearn.model_selection import train_test_split as tts
+    indices = np.arange(len(labels))
+    train_idx, val_idx = tts(indices, test_size=0.2, stratify=labels, random_state=42)
+    train_mask = torch.zeros(len(labels), dtype=torch.bool)
+    train_mask[train_idx] = True
+    val_mask = torch.zeros(len(labels), dtype=torch.bool)
+    val_mask[val_idx] = True
+    data['ip'].y = labels
+    data['ip'].train_mask = train_mask
+
+    train_loader = NeighborLoader(data, num_neighbors=[15, 10], batch_size=args.batch_size,
+                                  input_nodes=('ip', train_mask), shuffle=True, num_workers=0)
+
+    stat_dim = data['ip'].x.shape[1]
+    sem_dim = data['ip'].semantic_x.shape[1] if hasattr(data['ip'], 'semantic_x') else 0
+    struct_dim = data['ip'].struct_x.shape[1] if hasattr(data['ip'], 'struct_x') else 0
+    model = ImprovedBotnetDetectorV3Final(stat_dim=stat_dim, sem_dim=sem_dim, struct_dim=struct_dim, hidden_dim=128)
+    trainer = ImprovedTrainerV3Final(model, lr=args.lr, device=device)
+
+    log_ui(f"开始 V3 Final 训练，共 {args.epochs} 轮…")
+    send_ui("GNN_VIS", json.dumps({"phase": "train", "epoch": 0, "loss": 1.0, "layer": -1}))
+
+    for epoch in range(args.epochs):
+        loss_list = []
+        for batch in train_loader:
+            loss = trainer.train_step(batch)
+            loss_list.append(loss)
+        avg_loss = np.mean(loss_list)
+        send_ui("GNN_VIS", json.dumps({"phase": "train", "epoch": epoch + 1, "loss": round(avg_loss, 4), "layer": -1}))
+        send_ui("EPOCH_UPDATE", f"{epoch+1}|{args.epochs}|{avg_loss:.4f}")
+        print(f"Epoch {epoch+1} Loss: {avg_loss:.4f}")
+
+    send_ui("GNN_VIS", json.dumps({"phase": "idle", "epoch": args.epochs, "loss": avg_loss, "layer": -1}))
+    model.save(v3_model_path)
+
+    # 计算训练集先验
+    log_ui("计算训练集先验阈值…")
+    model.eval()
+    val_loader = NeighborLoader(data, num_neighbors=[15, 10], batch_size=4096,
+                                input_nodes=('ip', val_mask), shuffle=False, num_workers=0)
+    val_probs_list = []
+    with torch.no_grad():
+        for batch in val_loader:
+            batch = batch.to(device)
+            p = model.predict_proba(batch)[:batch['ip'].batch_size]
+            val_probs_list.append(p.cpu())
+    val_probs = torch.cat(val_probs_list).numpy()
+    val_labels = labels.numpy()[val_idx][:len(val_probs)]
+
+    fpr, tpr, thresholds = roc_curve(val_labels, val_probs)
+    youden_j = tpr - fpr
+    best_idx = np.argmax(youden_j)
+    best_thresh = float(thresholds[best_idx])
+    threshold_percentile = float((val_probs < best_thresh).mean() * 100)
+
+    train_prior = {
+        'threshold': best_thresh,
+        'threshold_percentile': threshold_percentile,
+        'bot_ratio': float(val_labels.sum() / len(val_labels)),
+    }
+    with open(v3_prior_path, 'w') as f:
+        json.dump(train_prior, f, indent=2)
+
+    args.model_path = v3_model_path
+    del data, model, trainer, labels
+    torch.cuda.empty_cache(); gc.collect()
+    log_ui("V3 Final 训练结束。")
+
+# --- 模块3c: V3 Final 推理 ---
+def run_v3final_inference(args, device):
+    send_ui("PHASE_START", "V3 Final 威胁评估")
+    v3_model_path = args.model_path if 'v3_final' in args.model_path else "improved_botnet_model_v3_final.pth"
+    v3_prior_path = v3_model_path.replace('.pth', '_prior.json')
+
+    if not os.path.exists(v3_model_path):
+        log_ui("错误：未找到 V3 Final 模型！")
+        return
+
+    log_ui("加载测试场景…")
+    loader = CTU13Loader(args.data_dir)
+    df = loader.load_data([int(s) for s in args.test_scenarios.split(',')])
+    if df.empty: return
+
+    log_ui("构建三模态推理图…")
+    builder = ImprovedHeterogeneousGraphBuilder()
+    data, ip_map = builder.build(df)
+    labels, _ = get_labels(df, ip_map)
+
+    log_ui("执行 V3 Final 推理…")
+    send_ui("GNN_VIS", json.dumps({"phase": "inference", "epoch": 0, "loss": 0, "layer": -1}))
+
+    model = ImprovedBotnetDetectorV3Final.load(v3_model_path, device=device)
+    model.eval()
+
+    infer_loader = NeighborLoader(data, num_neighbors=[15, 10], batch_size=4096, input_nodes='ip', shuffle=False)
+    all_probs = []
+    total_batches = len(infer_loader)
+    with torch.no_grad():
+        for i, batch in enumerate(infer_loader):
+            batch = batch.to(device)
+            p = model.predict_proba(batch)[:batch['ip'].batch_size]
+            all_probs.append(p.cpu())
+            if i % 5 == 0:
+                send_ui("PROGRESS_INFERENCE", f"{i}|{total_batches}")
+
+    probs = torch.cat(all_probs, dim=0).numpy()
+    send_ui("GNN_VIS", json.dumps({"phase": "idle", "layer": -1}))
+
+    y_true = labels.numpy()[:len(probs)]
+    probs = probs[:len(y_true)]
+
+    # 加载训练先验
+    train_prior = None
+    if os.path.exists(v3_prior_path):
+        with open(v3_prior_path, 'r') as f:
+            train_prior = json.load(f)
+
+    # 智能阈值优化
+    optimizer = SmartThresholdOptimizer(verbose=True, train_prior=train_prior)
+    thresh = optimizer.find_threshold(probs)
+    final_pred = (probs >= thresh).astype(int)
+
+    auc = roc_auc_score(y_true, probs)
+    precision, recall, f1, _ = precision_recall_fscore_support(y_true, final_pred, average='binary', zero_division=0)
+    send_ui("METRICS", f"{auc:.4f}|{f1:.4f}|{precision:.4f}|{recall:.4f}|{thresh:.6f}")
+    log_ui(f"V3 Final 评估: AUC={auc:.4f}, F1={f1:.4f}, P={precision:.4f}, R={recall:.4f}")
+
+    simulate_streaming(df, final_pred, probs, ip_map, args)
+
 # --- 模块3: 推理与流式展示 ---
 def run_inference(args, device):
     if args.method == 'baseline':
-        # 调用基线方法推理
         run_baseline_inference(args, device)
         return
-        
+    if args.method == 'v3_final':
+        run_v3final_inference(args, device)
+        return
+
     send_ui("PHASE_START", "威胁评估中")
     
     if not os.path.exists(args.model_path):
@@ -751,8 +910,23 @@ def simulate_streaming(df, final_pred, probs, ip_map, args):
             report = hmm_engine.run_inference_with_evaluation(df)
             with open("attack_chain_report.json", "w") as f:
                 json.dump(report, f)
+
+            # 2a. C2 节点识别（基于攻击链状态分析）
+            log_ui("识别 C2 服务器节点…")
+            c2_from_fsm = hmm_engine.identify_c2_nodes(df)
+            if c2_from_fsm:
+                with open("c2_candidates.json", "w") as f:
+                    json.dump(c2_from_fsm, f)
+                log_ui(f"FSM 识别到 {len(c2_from_fsm)} 个 C2 候选节点")
+
+            # 2b. 状态预测准确率评估
+            log_ui("评估状态预测准确率…")
+            eval_result = hmm_engine.evaluate_state_prediction(df)
+            with open("state_prediction_eval.json", "w") as f:
+                json.dump(eval_result, f)
+            log_ui(f"状态预测准确率: {eval_result['overall_accuracy']:.4f}")
                 
-        # 2. 生成时空拓扑报告（始终写入拓扑评估报告，便于前端不报错）
+        # 3. 生成时空拓扑报告
         log_ui("生成时空拓扑报告…")
         topo_eval = {
             "nodes_evaluated": len(predicted_bots),
@@ -764,13 +938,23 @@ def simulate_streaming(df, final_pred, probs, ip_map, args):
             analyzer = SpatioTemporalAnalyzer(bot_ips=list(predicted_bots))
             res, _ = analyzer.analyze(df)
             if res:
+                spatio_c2 = res.get('c2_candidates', [])
+                # 合并 FSM 和时空分析的 C2 候选
+                existing_c2 = []
+                if os.path.exists("c2_candidates.json"):
+                    with open("c2_candidates.json", "r") as f:
+                        existing_c2 = json.load(f)
+                existing_ips = set(c.get('ip') for c in existing_c2)
+                for c in spatio_c2:
+                    if isinstance(c, dict) and c.get('ip') not in existing_ips:
+                        existing_c2.append(c)
                 with open("c2_candidates.json", "w") as f:
-                    json.dump(res.get('c2_candidates', []), f)
-                topo_eval["c2_found"] = len(res.get('c2_candidates', []))
+                    json.dump(existing_c2, f)
+                topo_eval["c2_found"] = len(existing_c2)
             else:
-                # 即使分析返回空，也要写入空文件，确保前端不报错
-                with open("c2_candidates.json", "w") as f:
-                    json.dump([], f)
+                if not os.path.exists("c2_candidates.json"):
+                    with open("c2_candidates.json", "w") as f:
+                        json.dump([], f)
             # 复制拓扑可视化数据
             if os.path.exists("viz_data.json"):
                 import shutil
